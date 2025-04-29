@@ -2,6 +2,7 @@ import os
 import functools
 import sys
 import json
+import numpy as np
 import mlflow
 
 import torch
@@ -13,7 +14,11 @@ from lightning.pytorch.loggers import MLFlowLogger
 import torchvision
 
 from transformers import DetrImageProcessor, DetrForObjectDetection
+from transformers import pipeline, AutoConfig
+from transformers import ObjectDetectionPipeline
 import logging
+
+from PIL import Image
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +32,7 @@ logger = logging.getLogger("detr_training")
 
 # this is needed by yhe collate_fn
 CHECKPOINT = 'facebook/detr-resnet-50'
+config = AutoConfig.from_pretrained(CHECKPOINT)
 image_processor = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50")
 
 ##### Dataset Setup #####
@@ -142,6 +148,18 @@ class Detr(pl.LightningModule):
         return VAL_DATALOADER
 
 
+#### Model Logging Config
+
+# Numpy inputs aren't accerpted by the default pipline in transformers
+# We thus have two options, adapt the pipeline or write a custom pyfunc
+# It is easier to write a numpy friendly pipeline and use the default mlflow transformers integration
+class NumpyFriendlyObjectDetectionPipeline(ObjectDetectionPipeline):
+    def preprocess(self, image, timeout=None):
+        # If input is a NumPy array, convert to PIL.Image
+        if isinstance(image, np.ndarray):
+            image = Image.fromarray(image)
+        return super().preprocess(image, timeout=timeout)
+
 #### Train Loop Functions ####
 
 def mlflow_main_node_only(func):
@@ -171,11 +189,42 @@ def mlflow_main_node_only(func):
                                 run_id=kwargs.get('run_id', None)) as run:
               
                 # enable torch autologging features
-                mlflow.pytorch.autolog()
+                ### we need to custom log the model because of it's unique structure
+                mlflow.pytorch.autolog(log_models=False)
 
                 # Pass run ID to training function
                 kwargs['run_id'] = kwargs.get('run_id', None)
                 result = func(*args, **kwargs)
+                
+                # components = {
+                #     'model': model,
+                #     'image_processor': image_processor
+                # }
+                
+                detr_pipeline = NumpyFriendlyObjectDetectionPipeline(
+                    model=model.model,
+                    image_processor=image_processor,
+                    config=config
+                )
+                
+                sample_image = np.random.randint(0, 255, (640, 480, 3), dtype=np.uint8)
+                sample_output = detr_pipeline(sample_image)
+
+                signature = mlflow.models.infer_signature(
+                    sample_image,
+                    sample_output
+                )
+        
+                mlflow.transformers.log_model(
+                    transformers_model=detr_pipeline,
+                    artifact_path="rt-detr-model",
+                    task="object-detection",
+                    signature=signature,
+                    input_example=sample_image,
+                # For custom serving logic:
+                # pip_requirements=["torch", "transformers", "numpy"]
+                )
+                    
                 return result
 
         elif int(cuda_device) == 0:
@@ -291,6 +340,32 @@ if __name__ == '__main__':
     training_function(total_gpus, max_epochs=epochs, 
                       run_id=mlflow_run_id)
 
-
+    #### Proper Model Logging ####
+    # we need to split this out to structure the image pipeline and log with a signature to suit deployment models
     
+    # rank = int(os.environ.get("RANK", 0))
+    # if rank -- 0:
+    #     components = {
+    #         'model': model,
+    #         'image_processor': image_processor
+    #     }
+        
+    #     sample_image = np.random.randint(0, 255, (640, 480, 3), dtype=np.uint8)
+    #     sample_output = model(**image_processor(sample_image, return_tensors="pt"))
 
+    #     signature = mlflow.models.infer_signature(
+    #         sample_image,
+    #         {"logits": sample_output.logits.detach().numpy()}
+    #     )
+        
+    #     with mlflow.start_run(run_id = mlflow_run_id):
+    #         mlflow.transformers.log_model(
+    #             transformers_model=components,
+    #             artifact_path="rt-detr-model",
+    #             task="object-detection",
+    #             signature=signature,
+    #             input_example=sample_image,
+    #         # For custom serving logic:
+    #         # pip_requirements=["torch", "transformers", "numpy"]
+    #         )
+        
