@@ -107,7 +107,7 @@ class Detr(pl.LightningModule):
         return loss, loss_dict
 
     def training_step(self, batch, batch_idx):
-        logger_module = self.logger.experiment
+        #logger_module = self.logger.experiment
         
         loss, loss_dict = self.common_step(batch, batch_idx)     
         # logs metrics for each training_step, and the average across the epoch
@@ -118,7 +118,7 @@ class Detr(pl.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        logger_module = self.logger.experiment
+        #logger_module = self.logger.experiment
         loss, loss_dict = self.common_step(batch, batch_idx)     
         self.logger.log_metrics({"validation/loss": loss}, batch_idx)
         for k, v in loss_dict.items():
@@ -253,7 +253,10 @@ def mlflow_main_node_only(func):
 @mlflow_main_node_only
 def training_function(total_gpus: int, run_id: int = None, **kwargs):
     # Configure logger with existing run ID if available
-    volume_path = f'/Volumes/brian_ml_dev/image_processing'
+    catalog = kwargs.get("catalog")
+    schema = kwargs.get("schema")
+    
+    volume_path = f'/Volumes/{catalog}/{schema}'
     
     if run_id:
         mlf_logger = MLFlowLogger(
@@ -292,12 +295,12 @@ if __name__ == '__main__':
     token = args_dict['token']
     mlflow_run_id = args_dict['run_id']
     
-    ds_catalog = 'brian_ml_dev'
-    ds_schame = 'image_processing'
+    ds_catalog = args_dict['uc_catalog'] #'brian_ml_dev'
+    ds_schame = args_dict['uc_schema'] #'image_processing'
     coco_volume = 'coco_dataset'
     save_dir = '/local_disk0/train'
 
-    mlflow_experiment = '/Users/brian.law@databricks.com/brian_lightning'
+    mlflow_experiment = args_dict['mlflow_experiment'] #'/Users/brian.law@databricks.com/brian_lightning'
 
     volume_path = f"/Volumes/{ds_catalog}/{ds_schame}/{coco_volume}"
     image_path = f'{volume_path}'
@@ -338,7 +341,9 @@ if __name__ == '__main__':
     mlflow.set_experiment(mlflow_experiment)
     
     training_function(total_gpus, max_epochs=epochs, 
-                      run_id=mlflow_run_id)
+                      run_id=mlflow_run_id,
+                      catalog=ds_catalog,
+                      schema=ds_schame)
 
     #### Proper Model Logging ####
     # we need to split this out to structure the image pipeline and log with a signature to suit deployment models
